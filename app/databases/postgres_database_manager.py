@@ -2,8 +2,10 @@ from typing import Generator, Optional, Dict, Any, Union, List, TypeVar, cast
 from tenacity import retry, stop_after_attempt, wait_exponential
 from functools import lru_cache
 from contextlib import contextmanager
+from pathlib import Path
 import logging
 import traceback
+import os
 
 from sqlalchemy import create_engine, text, exc
 from sqlalchemy.orm import sessionmaker, scoped_session, Session
@@ -16,7 +18,7 @@ from app.configs.postgre_config import PostgreConfig
 
 T = TypeVar('T')
 
-class PostreException(Exception):
+class PostgreException(Exception):
     """Custom exception for postgres-related error"""
     pass
 
@@ -65,7 +67,7 @@ class PostgreManager(UtilityManager):
                 ssl_mode=ssl_mode or self.get_env_variable(EnvKeys.POSTGRES_SSLMODE.value)
             )
         except ValueError as e:
-            raise PostreException(f"Invalid port number: {str(e)}")
+            raise PostgreException(f"Invalid port number: {str(e)}")
 
     @retry(
         stop=stop_after_attempt(_MAX_RETRIES),
@@ -93,7 +95,7 @@ class PostgreManager(UtilityManager):
         except Exception as e:
             logging.error(f"Failed to initialize database connection: {str(e)}")
             logging.debug(traceback.format_exc())
-            raise PostreException(f"Failed to initialize database connection: {str(e)}")
+            raise PostgreException(f"Failed to initialize database connection: {str(e)}")
 
     def _create_connection_url(self) -> URL:
         """Create SQLAlchemy connection URL."""
@@ -164,7 +166,7 @@ class PostgreManager(UtilityManager):
             except SQLAlchemyError as e:
                 logging.error(f"Database query error: {str(e)}")
                 logging.debug(traceback.format_exc())
-                raise PostreException(f"Database query error: {str(e)}")
+                raise PostgreException(f"Database query error: {str(e)}")
 
     def _sanitize_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Sanitize query parameters."""
@@ -174,6 +176,51 @@ class PostgreManager(UtilityManager):
             ) else v 
             for k, v in params.items()
         }
+    
+    def _read_schema_file(self):
+        """
+        Read schema.sql file content
+
+        Returns:
+            str: SQL schema content
+
+        Raises:
+            PostgreException If schema file cannot be read
+        """
+        try:
+            project_dir = self.get_project_dir()
+            schema_path = os.path.join(project_dir, 'schema.sql')
+            with open(schema_path, 'r') as f:
+                return f.read()
+        
+        except Exception as e:
+            error_msg = f"Failed to read schema file: {str(e)}"
+            logging.error(error_msg)
+            raise PostgreException(error_msg)
+            
+    
+    def _create_table(self) -> None:
+        """
+        Create Table based on provided Schema
+
+        Raises:
+            PostgreException: If table rcreation fails
+        """
+        try:
+            schema = self._read_schema_file()
+            with self.session_scope() as session:
+                for query in schema.split(";"):
+                    query = query.strip()
+                    if query:
+                        session.execute(text(query))
+
+                logging.info("Database table created successfully")
+                
+        except SQLAlchemyError as e:
+            error_msg = f"failed to create tables: {str(e)}"
+            logging.error(error_msg)
+            logging.debug(traceback.format_exc)
+            raise PostgreException(error_msg)
 
     def _process_query_results(
         self,
@@ -204,7 +251,7 @@ class PostgreManager(UtilityManager):
     def get_session(self) -> Session:
         """Get a new database session"""
         if not hasattr(self, '_session'):
-            raise PostreException("Database session not initialized")
+            raise PostgreException("Database session not initialized")
         return self._session
 
     def cleanup(self) -> None:
